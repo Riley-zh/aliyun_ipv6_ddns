@@ -1,0 +1,8 @@
+access_key_id: 'your-access_key_id'
+access_key_secret: 'your-access_key_secret'
+domain: your-domain
+records:
+- rr: '@'
+  type: 'AAAA'
+interval: 300
+ttl: 600
