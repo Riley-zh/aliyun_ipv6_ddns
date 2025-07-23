@@ -45,12 +45,7 @@ ttl: 600
 
 ## 使用方法
 ### 1. 克隆项目
-首先，将项目克隆到本地：
-```bash
-git clone <项目仓库地址>
-cd <项目目录>
-```
-
+首先，将项目克隆到本地
 ### 2. 配置文件
 打开 `config.yaml` 文件，将 `access_key_id` 和 `access_key_secret` 替换为你自己的阿里云访问密钥，同时根据需要修改 `domain` 和 `records` 配置。
 
@@ -75,6 +70,3 @@ python aliyun_ddns_gui.py
 
 ## 贡献
 如果你对本项目有任何建议或发现了 bug，欢迎提交 issue 或 pull request。我们非常感谢你的贡献！
-
-## 许可证
-本项目遵循 [MIT 许可证](LICENSE)。
