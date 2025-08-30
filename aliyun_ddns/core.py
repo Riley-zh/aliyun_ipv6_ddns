@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+阿里云 DDNS 核心功能模块
+"""
+
 import re
 import time
 import yaml
@@ -12,6 +18,7 @@ from aliyunsdkalidns.request.v20150109 import (
     AddDomainRecordRequest
 )
 
+# 配置日志
 logger = logging.getLogger('aliyun_ddns')
 
 def log_message(message, level=logging.INFO):
@@ -22,8 +29,29 @@ def valid_ip(ip, ipv6=False):
     """验证IP地址格式"""
     try:
         if ipv6:
-            return bool(re.match(r"^(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}$", ip, re.I))
-        return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", ip))
+            # 简化的 IPv6 验证，检查是否包含有效的十六进制字符和冒号
+            # 这是一个实用的验证，而不是严格的 RFC 验证
+            if not ip or not isinstance(ip, str):
+                return False
+            # 检查是否只包含有效的 IPv6 字符
+            import re
+            # 检查是否是有效的 IPv6 格式（简化版）
+            if re.match(r'^[0-9a-fA-F:]+$', ip) and ':' in ip:
+                # 检查是否有多个冒号
+                if '::' in ip:
+                    # 压缩格式，最多只能有一个 ::
+                    if ip.count('::') > 1:
+                        return False
+                return True
+            return False
+        # IPv4 验证
+        parts = ip.split('.')
+        if len(parts) != 4:
+            return False
+        for part in parts:
+            if not part.isdigit() or not 0 <= int(part) <= 255:
+                return False
+        return True
     except Exception:
         return False
 
@@ -34,13 +62,14 @@ def get_public_ip(ipv6=False, services=None):
         'https://ipinfo.io/ip',
         'https://ifconfig.me/ip'
     ]
+    
     if ipv6:
-        services = [
+        services = services or [
             'https://api64.ipify.org',
             'https://v6.ident.me'
         ]
     else:
-        services = default_services
+        services = services or default_services
 
     def fetch_ip(url):
         try:
@@ -65,13 +94,15 @@ def validate_config(config):
     required = ['access_key_id', 'access_key_secret', 'domain', 'records']
     for field in required:
         if field not in config:
-            errors.append(f"缺少{field}")
+            errors.append(f"缺少配置项: {field}")
+    
     if 'records' in config:
         for i, r in enumerate(config['records']):
             if 'rr' not in r:
-                errors.append(f"记录{i+1}缺少rr")
+                errors.append(f"记录{i+1}缺少rr字段")
             if 'type' not in r or r['type'] not in ['A', 'AAAA']:
-                errors.append(f"记录{i+1}类型错误")
+                errors.append(f"记录{i+1}类型错误，必须是A或AAAA")
+    
     if errors:
         raise ValueError("配置错误: " + ", ".join(errors))
     return True
@@ -81,14 +112,20 @@ def load_config(path='config.yaml'):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f) or {}
+        
+        # 设置默认值
         config.setdefault('interval', 300)
+        config.setdefault('ttl', 600)
+        
+        # 为每个记录设置默认 TTL
         for record in config.get('records', []):
-            record.setdefault('ttl', 600)
+            record.setdefault('ttl', config['ttl'])
+        
         validate_config(config)
         log_message("配置加载成功")
         return config
     except Exception as e:
-        log_message("配置加载失败", logging.ERROR)
+        log_message(f"配置加载失败: {e}", logging.ERROR)
         raise
 
 def get_dns_record(client, domain, rr, record_type):
@@ -119,10 +156,10 @@ def update_dns_record(client, record, ip, config):
         req.set_Value(ip)
         req.set_TTL(config.get('ttl', 600))
         client.do_action_with_exception(req)
-        log_message(f"已更新: {record['RR']} -> {ip}")
+        log_message(f"已更新记录: {record['RR']} -> {ip}")
         return True
     except Exception as e:
-        log_message(f"更新失败: {e}", logging.ERROR)
+        log_message(f"更新记录失败: {e}", logging.ERROR)
         return False
 
 def create_dns_record(client, domain, rr, record_type, ip, config):
@@ -135,12 +172,13 @@ def create_dns_record(client, domain, rr, record_type, ip, config):
         req.set_Value(ip)
         req.set_TTL(config.get('ttl', 600))
         client.do_action_with_exception(req)
-        log_message(f"已创建: {rr}.{domain} -> {ip}")
+        log_message(f"已创建记录: {rr}.{domain} -> {ip}")
         return True
     except Exception as e:
         if "AlreadyExists" in str(e):
+            log_message(f"记录已存在: {rr}.{domain}")
             return True
-        log_message(f"创建失败: {e}", logging.ERROR)
+        log_message(f"创建记录失败: {e}", logging.ERROR)
         return False
 
 def sync_records(config):
@@ -155,15 +193,18 @@ def sync_records(config):
         success_count = 0
         total_records = len(config['records'])
         log_message(f"开始同步 {total_records} 条记录")
+        
         for record in config['records']:
             record_name = f"{record['rr']}.{config['domain']}"
             record_type = record['type']
+            
             # 获取当前IP
             log_message(f"[{record_name}] 正在获取{record_type}地址...")
             ip = get_public_ip(record_type == 'AAAA')
             if not ip:
                 log_message(f"[{record_name}] 获取IP失败", logging.ERROR)
                 continue
+            
             # 查询现有记录
             existing = get_dns_record(client, config['domain'], record['rr'], record_type)
             if existing:
@@ -172,16 +213,49 @@ def sync_records(config):
                     success_count += 1
                 else:
                     old_ip = existing['Value']
-                    if update_dns_record(client, existing, ip, record):
+                    if update_dns_record(client, existing, ip, config):
                         log_message(f"[{record_name}] IP已更新: {old_ip} → {ip}")
                         success_count += 1
             else:
-                if create_dns_record(client, config['domain'], record['rr'], record_type, ip, record):
+                if create_dns_record(client, config['domain'], record['rr'], record_type, ip, config):
                     log_message(f"[{record_name}] 记录已创建: {ip}")
                     success_count += 1
+        
         duration = time.time() - start_time
         log_message(f"同步完成: {success_count}/{total_records} 成功 ({duration:.1f}s)")
         return success_count > 0
     except Exception as e:
         log_message(f"同步失败: {e}", logging.ERROR)
         return False
+
+def main():
+    """主函数 - 命令行入口"""
+    import argparse
+    import os
+    
+    parser = argparse.ArgumentParser(description='阿里云 DDNS 客户端')
+    parser.add_argument('-c', '--config', default='config.yaml', help='配置文件路径')
+    parser.add_argument('-v', '--verbose', action='store_true', help='详细日志')
+    
+    args = parser.parse_args()
+    
+    # 配置日志
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    try:
+        # 加载配置
+        config = load_config(args.config)
+        
+        # 执行同步
+        success = sync_records(config)
+        return 0 if success else 1
+    except Exception as e:
+        log_message(f"程序执行失败: {e}", logging.ERROR)
+        return 1
+
+if __name__ == '__main__':
+    exit(main())
