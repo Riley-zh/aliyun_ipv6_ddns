@@ -9,7 +9,7 @@ import time
 import yaml
 import requests
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, as_completed
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.acs_exception.exceptions import ServerException, ClientException
 from aliyunsdkalidns.request.v20150109 import (
@@ -19,15 +19,20 @@ from aliyunsdkalidns.request.v20150109 import (
 )
 
 # 导入工具函数
-from .utils import setup_logging
+from .utils import setup_logging, retry
 
 # 配置日志
 logger = logging.getLogger('aliyun_ddns')
+
+# 全局缓存用于存储IP地址，避免频繁请求
+_ip_cache = {}
+_cache_timeout = 60  # 缓存60秒
 
 def log_message(message, level=logging.INFO):
     """通用日志记录函数"""
     logger.log(level, message)
 
+@retry(max_attempts=3, delay=1, backoff=2)
 def valid_ip(ip, ipv6=False):
     """验证IP地址格式"""
     try:
@@ -58,36 +63,49 @@ def valid_ip(ip, ipv6=False):
     except Exception:
         return False
 
+@retry(max_attempts=3, delay=1, backoff=2)
 def get_public_ip(ipv6=False, services=None):
     """获取公网IP"""
+    # 检查缓存
+    cache_key = 'ipv6' if ipv6 else 'ipv4'
+    if cache_key in _ip_cache:
+        cached_time, cached_ip = _ip_cache[cache_key]
+        if time.time() - cached_time < _cache_timeout:
+            return cached_ip
+    
     default_services = [
         'https://api.ipify.org',
         'https://ipinfo.io/ip',
-        'https://ifconfig.me/ip'
+        'https://ifconfig.me/ip',
+        'https://icanhazip.com',
+        'https://ident.me'
     ]
     
     if ipv6:
         services = services or [
             'https://api64.ipify.org',
-            'https://v6.ident.me'
+            'https://v6.ident.me',
+            'https://ipv6.icanhazip.com'
         ]
     else:
         services = services or default_services
 
     def fetch_ip(url):
         try:
-            r = requests.get(url, timeout=5)
+            r = requests.get(url, timeout=10)  # 增加超时时间
             r.raise_for_status()
             ip = r.text.strip()
             return ip if valid_ip(ip, ipv6) else None
         except Exception:
             return None
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:  # 增加工作线程数
         futures = [executor.submit(fetch_ip, url) for url in services]
         for future in as_completed(futures):
             ip = future.result()
             if ip:
+                # 缓存结果
+                _ip_cache[cache_key] = (time.time(), ip)
                 return ip
     return None
 
@@ -131,6 +149,7 @@ def load_config(path='config.yaml'):
         log_message(f"配置加载失败: {e}", logging.ERROR)
         raise
 
+@retry(max_attempts=3, delay=1, backoff=2)
 def get_dns_record(client, domain, rr, record_type):
     """获取DNS记录"""
     try:
@@ -149,6 +168,7 @@ def get_dns_record(client, domain, rr, record_type):
         log_message(f"查询记录失败: {e}", logging.ERROR)
         return None
 
+@retry(max_attempts=3, delay=1, backoff=2)
 def update_dns_record(client, record, ip, config):
     """更新DNS记录"""
     try:
@@ -165,6 +185,7 @@ def update_dns_record(client, record, ip, config):
         log_message(f"更新记录失败: {e}", logging.ERROR)
         return False
 
+@retry(max_attempts=3, delay=1, backoff=2)
 def create_dns_record(client, domain, rr, record_type, ip, config):
     """创建DNS记录"""
     try:

@@ -18,7 +18,7 @@ from tkinter import Tk, messagebox
 
 # 导入核心模块和工具函数
 from . import core
-from .utils import setup_logging, get_config_path
+from .utils import setup_logging, get_config_path, _config_lock
 
 APP_NAME = "阿里云DDNS"
 VERSION = "2.1.0"
@@ -29,8 +29,12 @@ class DDNSTrayApp:
         self.running = True
         self.config = None
         self.config_mtime = 0
+        self.last_sync_time = 0  # 上次同步时间
+        self.sync_interval = 10   # 同步间隔检查（秒）
+        
         # 立即加载配置
         self._load_config()
+        
         # 创建托盘
         self.icon = pystray.Icon(
             APP_NAME,
@@ -41,15 +45,22 @@ class DDNSTrayApp:
         core.log_message("应用已启动")
 
     def _load_config(self):
-        """加载配置"""
-        try:
-            if not os.path.exists(CONFIG_FILE):
-                self._create_default_config()
-            self.config_mtime = os.path.getmtime(CONFIG_FILE)
-            self.config = core.load_config(CONFIG_FILE)
-        except Exception as e:
-            core.log_message(f"配置错误: {e}", logging.ERROR)
-            self.config = None
+        """加载配置（线程安全）"""
+        with _config_lock:
+            try:
+                if not os.path.exists(CONFIG_FILE):
+                    self._create_default_config()
+                
+                current_mtime = os.path.getmtime(CONFIG_FILE)
+                if current_mtime > self.config_mtime:
+                    self.config_mtime = current_mtime
+                    self.config = core.load_config(CONFIG_FILE)
+                    return True
+                return False
+            except Exception as e:
+                core.log_message(f"配置错误: {e}", logging.ERROR)
+                self.config = None
+                return False
 
     def _create_default_config(self):
         """创建默认配置"""
@@ -98,21 +109,22 @@ class DDNSTrayApp:
         """后台工作线程"""
         while self.running:
             try:
-                # 检查配置更新
-                if os.path.exists(CONFIG_FILE):
-                    mtime = os.path.getmtime(CONFIG_FILE)
-                    if mtime > self.config_mtime:
-                        self._load_config()
+                # 检查配置更新（每30秒检查一次）
+                if int(time.time()) % 30 < self.sync_interval:
+                    if self._load_config():
                         self.icon.notify("配置已更新", APP_NAME)
                 
                 # 自动同步
                 if self.config:
                     interval = self.config.get('interval', 300)
-                    # 每隔一段时间执行一次同步
-                    if int(time.time()) % interval < 10:  # 窗口期10秒
+                    current_time = time.time()
+                    
+                    # 检查是否到了同步时间
+                    if current_time - self.last_sync_time >= interval:
                         self._sync_once()
+                        self.last_sync_time = current_time
                 
-                time.sleep(10)
+                time.sleep(self.sync_interval)
             except Exception as e:
                 core.log_message(f"工作线程错误: {e}", logging.ERROR)
                 time.sleep(30)
