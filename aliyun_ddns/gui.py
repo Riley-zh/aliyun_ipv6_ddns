@@ -30,7 +30,7 @@ class DDNSTrayApp:
         self.config = None
         self.config_mtime = 0
         self.last_sync_time = 0  # 上次同步时间
-        self.sync_interval = 10   # 同步间隔检查（秒）
+        self.sync_interval = 30   # 同步间隔检查（秒），增加到30秒以减少频繁检查
         
         # 立即加载配置
         self._load_config()
@@ -109,8 +109,8 @@ class DDNSTrayApp:
         """后台工作线程"""
         while self.running:
             try:
-                # 检查配置更新（每30秒检查一次）
-                if int(time.time()) % 30 < self.sync_interval:
+                # 检查配置更新（每60秒检查一次，减少频繁检查）
+                if int(time.time()) % 60 == 0:
                     if self._load_config():
                         self.icon.notify("配置已更新", APP_NAME)
                 
@@ -124,10 +124,11 @@ class DDNSTrayApp:
                         self._sync_once()
                         self.last_sync_time = current_time
                 
-                time.sleep(self.sync_interval)
+                # 减少CPU占用，增加到30秒
+                time.sleep(30)
             except Exception as e:
                 core.log_message(f"工作线程错误: {e}", logging.ERROR)
-                time.sleep(30)
+                time.sleep(60)  # 出错时等待更长时间
 
     def _sync_once(self):
         """执行同步"""

@@ -9,7 +9,7 @@ import time
 import yaml
 import requests
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.acs_exception.exceptions import ServerException, ClientException
 from aliyunsdkalidns.request.v20150109 import (
@@ -71,42 +71,65 @@ def get_public_ip(ipv6=False, services=None):
     if cache_key in _ip_cache:
         cached_time, cached_ip = _ip_cache[cache_key]
         if time.time() - cached_time < _cache_timeout:
+            logger.debug(f"使用缓存的IP地址: {cached_ip}")
             return cached_ip
     
-    default_services = [
+    # 默认服务列表
+    default_ipv4_services = [
         'https://api.ipify.org',
         'https://ipinfo.io/ip',
         'https://ifconfig.me/ip',
         'https://icanhazip.com',
-        'https://ident.me'
+        'https://ident.me',
+        'https://myexternalip.com/raw',
+        'https://ipecho.net/plain'
+    ]
+    
+    default_ipv6_services = [
+        'https://api64.ipify.org',
+        'https://v6.ident.me',
+        'https://ipv6.icanhazip.com',
+        'https://6.ident.me'
     ]
     
     if ipv6:
-        services = services or [
-            'https://api64.ipify.org',
-            'https://v6.ident.me',
-            'https://ipv6.icanhazip.com'
-        ]
+        services = services or default_ipv6_services
     else:
-        services = services or default_services
+        services = services or default_ipv4_services
 
     def fetch_ip(url):
         try:
-            r = requests.get(url, timeout=10)  # 增加超时时间
+            logger.debug(f"尝试从 {url} 获取IP地址")
+            r = requests.get(url, timeout=10)  # 10秒超时
             r.raise_for_status()
             ip = r.text.strip()
-            return ip if valid_ip(ip, ipv6) else None
-        except Exception:
+            if ip and valid_ip(ip, ipv6):
+                logger.debug(f"从 {url} 成功获取IP地址: {ip}")
+                return ip
+            else:
+                logger.debug(f"从 {url} 获取的IP地址无效: {ip}")
+                return None
+        except Exception as e:
+            logger.debug(f"从 {url} 获取IP地址失败: {e}")
             return None
 
-    with ThreadPoolExecutor(max_workers=5) as executor:  # 增加工作线程数
-        futures = [executor.submit(fetch_ip, url) for url in services]
-        for future in as_completed(futures):
-            ip = future.result()
-            if ip:
-                # 缓存结果
-                _ip_cache[cache_key] = (time.time(), ip)
-                return ip
+    # 使用线程池并发获取IP，提高效率
+    with ThreadPoolExecutor(max_workers=min(5, len(services))) as executor:
+        future_to_url = {executor.submit(fetch_ip, url): url for url in services}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                ip = future.result(timeout=12)  # 12秒超时，略高于请求超时
+                if ip:
+                    # 缓存结果
+                    _ip_cache[cache_key] = (time.time(), ip)
+                    logger.debug(f"成功获取IP地址并缓存: {ip}")
+                    return ip
+            except Exception as e:
+                logger.debug(f"从 {url} 获取IP时发生异常: {e}")
+                continue
+    
+    logger.warning("所有IP获取服务都失败了")
     return None
 
 def validate_config(config):
@@ -164,9 +187,15 @@ def get_dns_record(client, domain, rr, record_type):
             if r.get('RR') == rr and r.get('Type') == record_type:
                 return r
         return None
+    except ServerException as e:
+        logger.error(f"查询记录失败 (服务器错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
+    except ClientException as e:
+        logger.error(f"查询记录失败 (客户端错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
     except Exception as e:
-        log_message(f"查询记录失败: {e}", logging.ERROR)
-        return None
+        logger.error(f"查询记录失败 (未知错误): {e}")
+        raise
 
 @retry(max_attempts=3, delay=1, backoff=2)
 def update_dns_record(client, record, ip, config):
@@ -178,12 +207,19 @@ def update_dns_record(client, record, ip, config):
         req.set_Type(record['Type'])
         req.set_Value(ip)
         req.set_TTL(config.get('ttl', 600))
-        client.do_action_with_exception(req)
-        log_message(f"已更新记录: {record['RR']} -> {ip}")
+        resp = client.do_action_with_exception(req)
+        logger.debug(f"更新记录响应: {resp}")
+        logger.info(f"已更新记录: {record['RR']} -> {ip}")
         return True
+    except ServerException as e:
+        logger.error(f"更新记录失败 (服务器错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
+    except ClientException as e:
+        logger.error(f"更新记录失败 (客户端错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
     except Exception as e:
-        log_message(f"更新记录失败: {e}", logging.ERROR)
-        return False
+        logger.error(f"更新记录失败 (未知错误): {e}")
+        raise
 
 @retry(max_attempts=3, delay=1, backoff=2)
 def create_dns_record(client, domain, rr, record_type, ip, config):
@@ -195,15 +231,22 @@ def create_dns_record(client, domain, rr, record_type, ip, config):
         req.set_Type(record_type)
         req.set_Value(ip)
         req.set_TTL(config.get('ttl', 600))
-        client.do_action_with_exception(req)
-        log_message(f"已创建记录: {rr}.{domain} -> {ip}")
+        resp = client.do_action_with_exception(req)
+        logger.debug(f"创建记录响应: {resp}")
+        logger.info(f"已创建记录: {rr}.{domain} -> {ip}")
         return True
-    except Exception as e:
-        if "AlreadyExists" in str(e):
-            log_message(f"记录已存在: {rr}.{domain}")
+    except ServerException as e:
+        if "AlreadyExists" in str(e.get_error_code()):
+            logger.info(f"记录已存在: {rr}.{domain}")
             return True
-        log_message(f"创建记录失败: {e}", logging.ERROR)
-        return False
+        logger.error(f"创建记录失败 (服务器错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
+    except ClientException as e:
+        logger.error(f"创建记录失败 (客户端错误): {e.get_error_code()} - {e.get_error_msg()}")
+        raise
+    except Exception as e:
+        logger.error(f"创建记录失败 (未知错误): {e}")
+        raise
 
 def sync_records(config):
     """同步所有记录（带详细日志）"""
@@ -216,40 +259,69 @@ def sync_records(config):
         )
         success_count = 0
         total_records = len(config['records'])
-        log_message(f"开始同步 {total_records} 条记录")
+        logger.info(f"开始同步 {total_records} 条记录")
         
-        for record in config['records']:
-            record_name = f"{record['rr']}.{config['domain']}"
-            record_type = record['type']
+        # 使用线程池并发处理所有记录，提高效率
+        with ThreadPoolExecutor(max_workers=min(10, total_records)) as executor:
+            # 提交所有记录同步任务
+            future_to_record = {
+                executor.submit(sync_single_record, client, config, record): record 
+                for record in config['records']
+            }
             
-            # 获取当前IP
-            log_message(f"[{record_name}] 正在获取{record_type}地址...")
-            ip = get_public_ip(record_type == 'AAAA')
-            if not ip:
-                log_message(f"[{record_name}] 获取IP失败", logging.ERROR)
-                continue
-            
-            # 查询现有记录
-            existing = get_dns_record(client, config['domain'], record['rr'], record_type)
-            if existing:
-                if existing['Value'] == ip:
-                    log_message(f"[{record_name}] IP未变化: {ip}")
-                    success_count += 1
-                else:
-                    old_ip = existing['Value']
-                    if update_dns_record(client, existing, ip, config):
-                        log_message(f"[{record_name}] IP已更新: {old_ip} → {ip}")
+            # 处理完成的任务
+            for future in as_completed(future_to_record):
+                record = future_to_record[future]
+                try:
+                    result = future.result(timeout=30)  # 30秒超时
+                    if result:
                         success_count += 1
-            else:
-                if create_dns_record(client, config['domain'], record['rr'], record_type, ip, config):
-                    log_message(f"[{record_name}] 记录已创建: {ip}")
-                    success_count += 1
+                except Exception as e:
+                    record_name = f"{record['rr']}.{config['domain']}"
+                    record_type = record['type']
+                    logger.error(f"[{record_name}] 同步记录失败: {e}")
         
         duration = time.time() - start_time
-        log_message(f"同步完成: {success_count}/{total_records} 成功 ({duration:.1f}s)")
+        logger.info(f"同步完成: {success_count}/{total_records} 成功 ({duration:.1f}s)")
         return success_count > 0
     except Exception as e:
-        log_message(f"同步失败: {e}", logging.ERROR)
+        logger.error(f"同步失败: {e}")
+        return False
+
+def sync_single_record(client, config, record):
+    """同步单个记录"""
+    record_name = f"{record['rr']}.{config['domain']}"
+    record_type = record['type']
+    
+    try:
+        # 获取当前IP
+        logger.info(f"[{record_name}] 正在获取{record_type}地址...")
+        ip = get_public_ip(record_type == 'AAAA')
+        if not ip:
+            logger.error(f"[{record_name}] 获取IP失败")
+            return False
+        
+        # 查询现有记录
+        existing = get_dns_record(client, config['domain'], record['rr'], record_type)
+        if existing:
+            if existing['Value'] == ip:
+                logger.info(f"[{record_name}] IP未变化: {ip}")
+                return True
+            else:
+                old_ip = existing['Value']
+                if update_dns_record(client, existing, ip, config):
+                    logger.info(f"[{record_name}] IP已更新: {old_ip} → {ip}")
+                    return True
+                else:
+                    return False
+        else:
+            if create_dns_record(client, config['domain'], record['rr'], record_type, ip, config):
+                logger.info(f"[{record_name}] 记录已创建: {ip}")
+                return True
+            else:
+                return False
+    except Exception as e:
+        logger.error(f"[{record_name}] 处理记录时发生异常: {e}")
         return False
 
 def main():
