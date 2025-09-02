@@ -71,21 +71,13 @@ aliyun_ddns/
 ├── aliyun_ddns/
 │   ├── __init__.py
 │   ├── core.py         # 核心功能模块
-│   └── gui.py          # 图形界面模块
-├── tests/
-│   ├── __init__.py
-│   ├── test_core.py
-│   └── test_config.py
+│   ├── gui.py          # 图形界面模块
+│   └── utils.py        # 工具函数模块
+├── logs/               # 日志文件目录
 ├── config.yaml         # 配置文件
 ├── requirements.txt    # 依赖列表
 ├── setup.py            # 安装脚本
 └── README.md
-```
-
-### 运行测试
-
-```bash
-python -m pytest tests/
 ```
 
 ## 注意事项

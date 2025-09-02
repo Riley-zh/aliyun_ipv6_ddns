@@ -18,6 +18,9 @@ from aliyunsdkalidns.request.v20150109 import (
     AddDomainRecordRequest
 )
 
+# 导入工具函数
+from .utils import setup_logging
+
 # 配置日志
 logger = logging.getLogger('aliyun_ddns')
 
@@ -240,11 +243,7 @@ def main():
     args = parser.parse_args()
     
     # 配置日志
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    setup_logging("logs/core.log", args.verbose)
     
     try:
         # 加载配置

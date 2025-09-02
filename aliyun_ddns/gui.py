@@ -16,12 +16,13 @@ import pystray
 from PIL import Image, ImageDraw
 from tkinter import Tk, messagebox
 
-# 导入核心模块
+# 导入核心模块和工具函数
 from . import core
+from .utils import setup_logging, get_config_path
 
 APP_NAME = "阿里云DDNS"
 VERSION = "2.1.0"
-CONFIG_FILE = "config.yaml"
+CONFIG_FILE = get_config_path()
 
 class DDNSTrayApp:
     def __init__(self):
@@ -119,7 +120,7 @@ class DDNSTrayApp:
     def _sync_once(self):
         """执行同步"""
         try:
-            if core.sync_records(self.config):
+            if self.config and core.sync_records(self.config):
                 self.icon.title = f"{APP_NAME} - 已同步"
                 self.icon.icon = self._create_icon("#4CAF50")  # 绿色
             else:
@@ -134,6 +135,11 @@ class DDNSTrayApp:
     def _show_records(self, icon, item):
         """显示记录"""
         try:
+            # 检查配置是否已加载
+            if not self.config:
+                self._msg("错误", "配置未加载")
+                return
+                
             from aliyunsdkcore.client import AcsClient
             client = AcsClient(
                 self.config['access_key_id'],
@@ -179,12 +185,7 @@ class DDNSTrayApp:
 def main():
     """GUI 入口函数"""
     # 配置日志
-    logging.basicConfig(
-        filename="aliyun_ddns.log",
-        level=logging.INFO,
-        format='%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+    setup_logging("logs/gui.log")
     
     try:
         app = DDNSTrayApp()
